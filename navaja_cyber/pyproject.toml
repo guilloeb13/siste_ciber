@@ -1,0 +1,117 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "navaja-cyber"
+version = "0.1.0"
+description = "Swiss-Army Cyber Toolkit - Defense, Monitoring, Forensics & CTF Training Platform"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "NavajaCyber Team", email = "security@navajacyber.local"}
+]
+requires-python = ">=3.11"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+]
+
+dependencies = [
+    # Core Backend
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.1.0",
+
+    # Database & Cache
+    "asyncpg>=0.29.0",
+    "sqlalchemy[asyncio]>=2.0.23",
+    "alembic>=1.13.0",
+    "redis>=5.0.0",
+    "aioredis>=2.0.1",
+
+    # HTTP & Async
+    "httpx>=0.25.0",
+    "aiohttp>=3.9.0",
+    "websockets>=12.0",
+
+    # Security & Auth
+    "python-jose[cryptography]>=3.3.0",
+    "passlib[bcrypt]>=1.7.4",
+    "python-multipart>=0.0.6",
+
+    # Monitoring & Metrics
+    "psutil>=5.9.0",
+    "prometheus-client>=0.19.0",
+
+    # Analysis Tools
+    "bandit>=1.7.6",
+    "pip-audit>=2.6.0",
+
+    # Forensics
+    "python-magic>=0.4.27",
+    "scapy>=2.5.0",
+
+    # Storage
+    "minio>=7.2.0",
+    "elasticsearch[async]>=8.11.0",
+
+    # Utilities
+    "python-dotenv>=1.0.0",
+    "pyyaml>=6.0.1",
+    "jinja2>=3.1.2",
+    "click>=8.1.7",
+    "rich>=13.7.0",
+    "structlog>=23.2.0",
+
+    # Docker SDK
+    "docker>=7.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+    "httpx>=0.25.0",
+    "ruff>=0.1.6",
+    "mypy>=1.7.0",
+    "black>=23.11.0",
+]
+
+windows = [
+    "python-evtx>=0.7.4",
+    "wmi>=1.5.1",
+]
+
+[project.scripts]
+navaja-agent = "agents.linux_agent:main"
+navaja-server = "backend.app.main:run_server"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["backend*", "agents*", "analysis*", "forensic*", "ctf*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-v --cov=backend --cov-report=term-missing"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true

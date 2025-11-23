@@ -1,0 +1,156 @@
+version: '3.8'
+
+# =============================================================================
+# NavajaCyber Docker Compose - Development Setup
+# USO AUTORIZADO ÚNICAMENTE
+# =============================================================================
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: navaja-postgres
+    environment:
+      POSTGRES_USER: navaja
+      POSTGRES_PASSWORD: navaja_secret
+      POSTGRES_DB: navaja_cyber
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U navaja -d navaja_cyber"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - navaja-net
+
+  # Redis Cache & PubSub
+  redis:
+    image: redis:7-alpine
+    container_name: navaja-redis
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - navaja-net
+
+  # MinIO Object Storage (for forensic evidence)
+  minio:
+    image: minio/minio:latest
+    container_name: navaja-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      - navaja-net
+
+  # Elasticsearch (optional - for log analysis)
+  elasticsearch:
+    image: elasticsearch:8.11.0
+    container_name: navaja-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    ports:
+      - "9200:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - navaja-net
+    profiles:
+      - full
+
+  # Backend API
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: navaja-backend
+    environment:
+      - APP_ENV=development
+      - DEBUG=true
+      - DATABASE_URL=postgresql+asyncpg://navaja:navaja_secret@postgres:5432/navaja_cyber
+      - REDIS_URL=redis://redis:6379/0
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - ELASTICSEARCH_URL=http://elasticsearch:9200
+      - SECRET_KEY=dev-secret-key-change-in-production
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app/backend
+      - ./analysis:/app/analysis
+      - ./forensic:/app/forensic
+      - ./ctf:/app/ctf
+      - ./agents:/app/agents
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - navaja-net
+    command: uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # Frontend Dashboard
+  frontend:
+    image: node:20-alpine
+    container_name: navaja-frontend
+    working_dir: /app
+    volumes:
+      - ./frontend:/app
+    ports:
+      - "3000:3000"
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0 --port 3000"
+    networks:
+      - navaja-net
+
+  # CTF Challenge Network (isolated)
+  ctf-network:
+    image: alpine:latest
+    container_name: navaja-ctf-init
+    command: echo "CTF network initialized"
+    networks:
+      - navaja-ctf-net
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  elasticsearch_data:
+
+networks:
+  navaja-net:
+    driver: bridge
+  navaja-ctf-net:
+    driver: bridge
+    internal: true  # Isolated from external network

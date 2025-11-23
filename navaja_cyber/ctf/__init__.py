@@ -1,0 +1,1 @@
+"""NavajaCyber CTF Training Package."""

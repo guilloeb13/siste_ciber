@@ -1,0 +1,57 @@
+# NavajaCyber Agent Configuration Example
+# Copy to /etc/navaja/agent.conf and customize
+
+# Backend server URL
+backend_url: http://localhost:8000
+
+# Agent identification (obtained during registration)
+agent_id: ""
+agent_token: ""
+
+# Collection interval in seconds
+metric_interval: 30
+
+# Agent name (defaults to hostname if empty)
+agent_name: ""
+
+# Tags for categorization
+tags:
+  - production
+  - web-server
+  - region-us-east
+
+# Critical processes to monitor
+processes:
+  - nginx
+  - postgres
+  - redis-server
+  - sshd
+
+# HTTP/HTTPS services to check
+services:
+  - url: http://localhost/health
+    timeout: 5
+  - url: https://api.example.com/status
+    timeout: 10
+
+# TLS certificates to monitor for expiration
+certificates:
+  - host: example.com
+    port: 443
+  - host: api.example.com
+    port: 443
+
+# Files to check for integrity (hashes computed)
+file_integrity:
+  - /etc/passwd
+  - /etc/shadow
+  - /etc/sudoers
+  - /usr/bin/sudo
+  - /usr/bin/ssh
+  - /etc/ssh/sshd_config
+
+# Custom metrics (optional)
+# custom_metrics:
+#   - name: custom_metric_name
+#     command: "command to get value"
+#     unit: "unit"
