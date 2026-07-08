@@ -1,11 +1,13 @@
 """CTF module router for training challenges."""
 
 import hashlib
+import hmac
 import secrets
 from datetime import datetime
 from typing import Annotated
 from uuid import UUID, uuid4
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select, update
@@ -20,7 +22,18 @@ from backend.app.models.user import User, Role
 from backend.app.routers.auth import get_current_user, require_role
 from backend.app.services.database import get_db
 
+logger = structlog.get_logger(__name__)
 router = APIRouter()
+
+# Only these keys may be passed through to Docker when launching a challenge.
+# Everything else (privileged, volumes, cap_add, devices, pid_mode,
+# network_mode, security_opt, ...) is dropped to prevent container escape.
+_ALLOWED_DOCKER_KWARGS = {"environment", "ports", "mem_limit", "cpu_quota", "command"}
+
+
+def _safe_docker_config(config: dict) -> dict:
+    """Filter a challenge's docker_config down to a safe, allow-listed subset."""
+    return {k: v for k, v in (config or {}).items() if k in _ALLOWED_DOCKER_KWARGS}
 
 
 class EventCreate(BaseModel):
@@ -201,13 +214,22 @@ async def activate_challenge(
             # Pull image if needed
             client.images.pull(challenge.docker_image)
 
-            # Start container with configured options
+            # Start container with hardened, resource-limited defaults. Only an
+            # allow-listed subset of docker_config is honoured; dangerous
+            # options that could break isolation are ignored.
+            safe_config = _safe_docker_config(challenge.docker_config)
             container = client.containers.run(
                 challenge.docker_image,
                 detach=True,
                 network=settings.ctf_docker_network,
                 name=f"ctf_{challenge_id}",
-                **challenge.docker_config,
+                mem_limit=safe_config.pop("mem_limit", "512m"),
+                cpu_quota=safe_config.pop("cpu_quota", 50000),
+                cap_drop=["ALL"],
+                security_opt=["no-new-privileges:true"],
+                read_only=False,
+                pids_limit=256,
+                **safe_config,
             )
 
             return {
@@ -217,10 +239,12 @@ async def activate_challenge(
             }
 
         except Exception as e:
+            # Do not leak internal error details to the API caller.
+            logger.error("ctf_container_start_failed", challenge_id=str(challenge_id), error=str(e))
             return {
                 "status": "activated_no_container",
                 "challenge_id": str(challenge_id),
-                "error": str(e),
+                "error": "Failed to start challenge container",
             }
 
     return {
@@ -328,7 +352,8 @@ async def submit_flag(
         (settings.ctf_flag_prefix + submission.flag + settings.ctf_flag_suffix).encode()
     ).hexdigest()
 
-    is_correct = submitted_hash == challenge.flag_hash
+    # Constant-time comparison avoids leaking flag bytes via response timing.
+    is_correct = hmac.compare_digest(submitted_hash, challenge.flag_hash)
     points = challenge.points if is_correct else 0
 
     # Record submission

@@ -1,6 +1,6 @@
 """Authentication router with JWT and RBAC."""
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Annotated
 from uuid import UUID
 
@@ -8,8 +8,8 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-from pydantic import BaseModel, EmailStr
-from sqlalchemy import select
+from pydantic import BaseModel, EmailStr, Field
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.config import settings
@@ -22,10 +22,18 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/token")
 
 
 class UserCreate(BaseModel):
-    username: str
+    username: str = Field(min_length=3, max_length=100)
     email: EmailStr
-    password: str
-    role: Role = Role.ANALYST
+    # Enforce a minimum password length at the edge. bcrypt caps input at 72
+    # bytes, so cap here to give a clear error instead of silent truncation.
+    password: str = Field(min_length=12, max_length=72)
+    # NOTE: role is intentionally NOT accepted from the client. Privileged roles
+    # are assigned by an administrator via /users/{id}/role. Allowing the client
+    # to choose its own role was a privilege-escalation vulnerability.
+
+
+class RoleUpdate(BaseModel):
+    role: Role
 
 
 class UserResponse(BaseModel):
@@ -60,8 +68,9 @@ def get_password_hash(password: str) -> str:
 
 def create_access_token(data: dict, expires_delta: timedelta | None = None) -> str:
     to_encode = data.copy()
-    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=settings.jwt_expire_minutes))
-    to_encode.update({"exp": expire})
+    now = datetime.now(timezone.utc)
+    expire = now + (expires_delta or timedelta(minutes=settings.jwt_expire_minutes))
+    to_encode.update({"exp": expire, "iat": now})
     return jwt.encode(to_encode, settings.secret_key, algorithm=settings.jwt_algorithm)
 
 
@@ -118,17 +127,42 @@ async def register(user_data: UserCreate, db: Annotated[AsyncSession, Depends(ge
     if result.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="Email already registered")
 
+    # First user to register bootstraps the ADMIN account. Everyone else gets
+    # the least-privileged role and must be promoted by an administrator.
+    total_users = await db.execute(select(func.count()).select_from(User))
+    is_first_user = (total_users.scalar() or 0) == 0
+    assigned_role = Role.ADMIN if is_first_user else Role.OPERATOR
+
     user = User(
         username=user_data.username,
         email=user_data.email,
         password_hash=get_password_hash(user_data.password),
-        role=user_data.role,
+        role=assigned_role,
     )
     db.add(user)
     await db.commit()
     await db.refresh(user)
 
     return user
+
+
+@router.patch("/users/{user_id}/role", response_model=UserResponse)
+async def update_user_role(
+    user_id: UUID,
+    payload: RoleUpdate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    admin: Annotated[User, Depends(require_role([Role.ADMIN]))],
+):
+    """Assign a role to a user. Administrators only."""
+    result = await db.execute(select(User).where(User.id == user_id))
+    target = result.scalar_one_or_none()
+    if target is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    target.role = payload.role
+    await db.commit()
+    await db.refresh(target)
+    return target
 
 
 @router.post("/token", response_model=Token)

@@ -3,7 +3,19 @@
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Placeholder secrets that must never be used in production. Startup fails
+# fast if any of these (or a too-short key) is active while APP_ENV=production.
+_WEAK_SECRETS = {
+    "change-this-to-a-secure-random-string-min-32-chars",
+    "dev-secret-key-change-in-production",
+    "test-secret-key",
+    "test",
+    "secret",
+    "changeme",
+}
 
 
 class Settings(BaseSettings):
@@ -31,7 +43,16 @@ class Settings(BaseSettings):
     secret_key: str = "change-this-to-a-secure-random-string-min-32-chars"
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 30
+    # Hostnames accepted in the Host header (TrustedHostMiddleware).
     allowed_hosts: str = "localhost,127.0.0.1"
+    # Browser origins allowed by CORS. MUST be full origins (scheme://host:port),
+    # comma-separated. Empty = no cross-origin browser access (safe default).
+    cors_allow_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
+    # Optional shared secret required to enroll a new monitoring agent. When
+    # empty, registration is open (development only).
+    agent_enrollment_token: str = ""
+    # When set, repository scans by local path are restricted to this directory.
+    scan_base_dir: str = ""
 
     # Rate Limiting
     rate_limit_default: int = 100
@@ -81,6 +102,32 @@ class Settings(BaseSettings):
 
     # Simulation
     simulation_mode: bool = False
+
+    @model_validator(mode="after")
+    def _enforce_production_hardening(self) -> "Settings":
+        """Fail fast on insecure configuration in production environments."""
+        if self.app_env == "production":
+            key = self.secret_key.strip()
+            if key in _WEAK_SECRETS or len(key) < 32:
+                raise ValueError(
+                    "SECRET_KEY must be a unique random value of at least 32 "
+                    "characters in production (generate with "
+                    "`python -c 'import secrets; print(secrets.token_urlsafe(48))'`)."
+                )
+            if self.debug:
+                raise ValueError("DEBUG must be false in production.")
+            if "*" in self.cors_allow_origins.split(","):
+                raise ValueError("CORS wildcard origin is not allowed in production.")
+        return self
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        """Parsed, de-duplicated list of allowed CORS origins."""
+        return [o.strip() for o in self.cors_allow_origins.split(",") if o.strip()]
+
+    @property
+    def allowed_hosts_list(self) -> list[str]:
+        return [h.strip() for h in self.allowed_hosts.split(",") if h.strip()]
 
 
 @lru_cache

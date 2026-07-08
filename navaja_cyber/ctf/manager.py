@@ -9,6 +9,7 @@ en entornos aislados y controlados.
 
 import asyncio
 import hashlib
+import hmac
 import secrets
 from datetime import datetime
 from pathlib import Path
@@ -201,9 +202,9 @@ class ChallengeManager:
             }
 
     def validate_flag(self, submitted_flag: str, flag_hash: str) -> bool:
-        """Validate a submitted flag against the stored hash."""
+        """Validate a submitted flag against the stored hash (constant time)."""
         submitted_hash = self.hash_flag(submitted_flag)
-        return submitted_hash == flag_hash
+        return hmac.compare_digest(submitted_hash, flag_hash)
 
     async def list_running_challenges(self) -> list[dict]:
         """List all running challenge containers."""

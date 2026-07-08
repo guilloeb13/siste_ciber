@@ -369,6 +369,13 @@ class NavajaCyberAgent:
                 logger.error(f"Registration error: {e}")
                 return False
 
+    def _auth_headers(self) -> dict:
+        """Headers proving this agent's identity to the ingestion API."""
+        return {
+            "X-Agent-Id": str(self.agent_id or ""),
+            "X-Agent-Token": self.agent_token or "",
+        }
+
     async def send_heartbeat(self):
         """Send heartbeat to server."""
         if not self.agent_id:
@@ -379,6 +386,7 @@ class NavajaCyberAgent:
                 await client.post(
                     f"{self.backend_url}/api/agents/{self.agent_id}/heartbeat",
                     json={"status": "active"},
+                    headers=self._auth_headers(),
                     timeout=5,
                 )
             except Exception as e:
@@ -400,6 +408,7 @@ class NavajaCyberAgent:
                 response = await client.post(
                     f"{self.backend_url}/api/metrics/batch",
                     json={"metrics": metrics},
+                    headers=self._auth_headers(),
                     timeout=10,
                 )
 

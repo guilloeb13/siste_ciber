@@ -101,7 +101,10 @@ services:
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin
       - ELASTICSEARCH_URL=http://elasticsearch:9200
-      - SECRET_KEY=dev-secret-key-change-in-production
+      # DEV ONLY. Provide a real key via a .env file / secret manager in any
+      # non-development environment (the app refuses weak keys when APP_ENV=production).
+      - SECRET_KEY=${SECRET_KEY:-dev-only-insecure-key-do-not-use-in-prod-000}
+      - CORS_ALLOW_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
     ports:
       - "8000:8000"
     volumes:

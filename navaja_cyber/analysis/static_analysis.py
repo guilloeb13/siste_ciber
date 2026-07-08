@@ -176,13 +176,15 @@ async def detect_secrets(target_path: str) -> list[dict]:
                     for pattern, secret_type in patterns:
                         matches = re.finditer(pattern, line)
                         for match in matches:
-                            # Don't capture the actual secret value
+                            # Redact the matched secret so we never persist the
+                            # actual value into the findings store.
+                            redacted = line.replace(match.group(0), f"[REDACTED_{secret_type.upper()}]")
                             results.append({
                                 "file": str(file_path.relative_to(path)),
                                 "line": line_num,
                                 "type": secret_type,
                                 "pattern": pattern[:50] + "...",
-                                "snippet": line[:100] + "..." if len(line) > 100 else line,
+                                "snippet": redacted[:120],
                             })
 
             except Exception as e:

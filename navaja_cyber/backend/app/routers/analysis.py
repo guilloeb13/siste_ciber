@@ -1,6 +1,7 @@
 """Analysis router for code and dependency scanning."""
 
 import asyncio
+import os
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -15,6 +16,14 @@ from backend.app.config import settings
 from backend.app.models.finding import Finding, FindingSeverity, FindingStatus
 from backend.app.models.user import User
 from backend.app.routers.auth import get_current_user
+from backend.app.security import (
+    ValidationError,
+    resolve_within,
+    safe_zip_members,
+    sanitize_filename,
+    validate_git_ref,
+    validate_git_url,
+)
 from backend.app.services.database import get_db
 
 router = APIRouter()
@@ -65,6 +74,28 @@ async def start_scan(
             detail="Either repo_path or git_url must be provided"
         )
 
+    # Validate untrusted inputs before they reach subprocess/filesystem calls.
+    if scan_request.git_url:
+        try:
+            validate_git_url(scan_request.git_url)
+            validate_git_ref(scan_request.branch)
+        except ValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    if scan_request.repo_path:
+        # Local-path scanning is restricted to an operator-configured base
+        # directory to prevent reading arbitrary files (e.g. /etc, secrets).
+        if not settings.scan_base_dir:
+            raise HTTPException(
+                status_code=400,
+                detail="Local path scanning is disabled (set SCAN_BASE_DIR to enable).",
+            )
+        try:
+            resolved = resolve_within(settings.scan_base_dir, scan_request.repo_path)
+        except ValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        scan_request.repo_path = str(resolved)
+
     scan_id = uuid4()
 
     # Queue background scan task
@@ -100,16 +131,29 @@ async def run_scan_task(
 
     target_path = repo_path
 
-    # Clone if git URL provided
+    # Clone if git URL provided. Inputs were validated by the request handler;
+    # we still use an argument list (never a shell) and disable interactive
+    # prompts / credential helpers so a malicious URL cannot inject commands.
     if git_url:
+        try:
+            validate_git_url(git_url)
+            validate_git_ref(branch)
+        except ValidationError:
+            return
         target_path = tempfile.mkdtemp(prefix="navaja_scan_")
-        clone_cmd = f"git clone --depth 1 --branch {branch} {git_url} {target_path}"
-        proc = await asyncio.create_subprocess_shell(
-            clone_cmd,
+        env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "true"}
+        proc = await asyncio.create_subprocess_exec(
+            "git", "clone", "--depth", "1", "--single-branch",
+            "--branch", branch, "--", git_url, target_path,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
         )
         await proc.wait()
+        if proc.returncode != 0:
+            import shutil
+            shutil.rmtree(target_path, ignore_errors=True)
+            return
 
     if not target_path or not Path(target_path).exists():
         return
@@ -230,22 +274,38 @@ async def upload_and_scan(
             detail=f"File too large. Max size: {settings.max_repo_size_mb}MB"
         )
 
+    # Sanitize the client-supplied filename to a bare basename (no traversal).
+    try:
+        safe_name = sanitize_filename(file.filename or "upload.zip")
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
     # Save to temp file
     scan_id = uuid4()
     temp_dir = tempfile.mkdtemp(prefix=f"navaja_upload_{scan_id}_")
-    zip_path = Path(temp_dir) / file.filename
+    zip_path = Path(temp_dir) / safe_name
 
     with open(zip_path, "wb") as f:
         f.write(content)
 
-    # Extract if zip
+    # Extract if zip, guarding against Zip Slip (path traversal) and zip bombs.
     extract_dir = Path(temp_dir) / "extracted"
     extract_dir.mkdir()
 
-    if file.filename.endswith(".zip"):
+    if safe_name.endswith(".zip"):
         import zipfile
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            zf.extractall(extract_dir)
+        # Allow the decompressed payload to be at most 4x the configured repo
+        # limit, capping runaway expansion from a malicious archive.
+        max_uncompressed = settings.max_repo_size_mb * 1024 * 1024 * 4
+        try:
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                members = safe_zip_members(zf, str(extract_dir), max_uncompressed)
+                for member in members:
+                    zf.extract(member, extract_dir)
+        except (ValidationError, zipfile.BadZipFile) as exc:
+            import shutil
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise HTTPException(status_code=400, detail=f"Invalid archive: {exc}")
 
     # Queue scan
     background_tasks.add_task(

@@ -5,12 +5,13 @@ from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 from passlib.context import CryptContext
 from pydantic import BaseModel
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.config import settings
 from backend.app.models.agent import Agent, AgentStatus
 from backend.app.models.user import User, Role
 from backend.app.routers.auth import get_current_user, require_role
@@ -18,6 +19,39 @@ from backend.app.services.database import get_db
 
 router = APIRouter()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+
+async def authenticate_agent(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    x_agent_id: Annotated[str | None, Header()] = None,
+    x_agent_token: Annotated[str | None, Header()] = None,
+) -> Agent:
+    """Authenticate an agent via its ID + bearer token headers.
+
+    Metric and heartbeat ingestion must prove possession of the token issued at
+    registration; otherwise anyone could inject fabricated telemetry for any
+    agent. Returns the authenticated Agent or raises 401.
+    """
+    invalid = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid or missing agent credentials",
+    )
+    if not x_agent_id or not x_agent_token:
+        raise invalid
+    try:
+        agent_uuid = UUID(x_agent_id)
+    except (ValueError, TypeError):
+        raise invalid
+
+    result = await db.execute(select(Agent).where(Agent.id == agent_uuid))
+    agent = result.scalar_one_or_none()
+    if agent is None or not agent.enabled:
+        # Still run a verify to reduce user-enumeration timing differences.
+        pwd_context.dummy_verify()
+        raise invalid
+    if not pwd_context.verify(x_agent_token, agent.token_hash):
+        raise invalid
+    return agent
 
 
 class AgentRegister(BaseModel):
@@ -57,9 +91,24 @@ class AgentHeartbeat(BaseModel):
 @router.post("/register", response_model=AgentRegistered)
 async def register_agent(
     agent_data: AgentRegister,
-    db: Annotated[AsyncSession, Depends(get_db)]
+    db: Annotated[AsyncSession, Depends(get_db)],
+    x_enrollment_token: Annotated[str | None, Header()] = None,
 ):
-    """Register a new monitoring agent and get authentication token."""
+    """Register a new monitoring agent and get authentication token.
+
+    When AGENT_ENROLLMENT_TOKEN is configured, a matching X-Enrollment-Token
+    header is required so that not just anyone can enroll an agent.
+    """
+    expected = settings.agent_enrollment_token
+    if expected:
+        if not x_enrollment_token or not secrets.compare_digest(
+            x_enrollment_token, expected
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid enrollment token",
+            )
+
     # Generate secure token
     token = secrets.token_urlsafe(32)
     token_hash = pwd_context.hash(token)
@@ -123,17 +172,19 @@ async def agent_heartbeat(
     agent_id: UUID,
     heartbeat: AgentHeartbeat,
     db: Annotated[AsyncSession, Depends(get_db)],
+    agent: Annotated[Agent, Depends(authenticate_agent)],
 ):
-    """Update agent heartbeat and status."""
-    result = await db.execute(
+    """Update agent heartbeat and status (authenticated agent only)."""
+    # An agent may only update its own heartbeat.
+    if agent.id != agent_id:
+        raise HTTPException(status_code=403, detail="Agent id mismatch")
+
+    await db.execute(
         update(Agent)
         .where(Agent.id == agent_id)
         .values(last_seen=datetime.utcnow(), status=heartbeat.status)
-        .returning(Agent.id)
     )
-
-    if not result.scalar_one_or_none():
-        raise HTTPException(status_code=404, detail="Agent not found")
+    await db.commit()
 
     return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
 

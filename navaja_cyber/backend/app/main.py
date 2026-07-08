@@ -14,6 +14,7 @@ from typing import Any
 import structlog
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 
 from backend.app.config import settings
@@ -83,6 +84,27 @@ manager = ConnectionManager()
 redis_service: RedisService | None = None
 
 
+async def _authenticate_websocket(websocket: WebSocket) -> bool:
+    """Validate the JWT supplied as a ``token`` query parameter.
+
+    WebSocket handshakes cannot use the Authorization header from browsers, so
+    the short-lived access token is passed as a query parameter. Closes the
+    socket with policy-violation (1008) when the token is missing or invalid.
+    """
+    from jose import JWTError, jwt
+
+    token = websocket.query_params.get("token")
+    if not token:
+        await websocket.close(code=1008)
+        return False
+    try:
+        jwt.decode(token, settings.secret_key, algorithms=[settings.jwt_algorithm])
+    except JWTError:
+        await websocket.close(code=1008)
+        return False
+    return True
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager."""
@@ -148,13 +170,23 @@ app = FastAPI(
     redoc_url="/redoc" if settings.debug else None,
 )
 
-# CORS middleware
+# Reject requests with an unexpected Host header (defends against Host-header
+# poisoning and DNS-rebinding). "*" only when explicitly configured.
+if settings.allowed_hosts_list and "*" not in settings.allowed_hosts_list:
+    app.add_middleware(
+        TrustedHostMiddleware,
+        allowed_hosts=settings.allowed_hosts_list,
+    )
+
+# CORS: only explicit origins may be combined with credentials. The old code
+# fell back to "*" with allow_credentials=True, which is invalid and unsafe.
+_cors_origins = settings.cors_origins_list
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.allowed_hosts.split(",") if settings.allowed_hosts else ["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_cors_origins,
+    allow_credentials=bool(_cors_origins),
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 
@@ -211,6 +243,8 @@ async def health_check():
 @app.websocket("/ws/metrics")
 async def websocket_metrics(websocket: WebSocket):
     """WebSocket endpoint for real-time metrics streaming."""
+    if not await _authenticate_websocket(websocket):
+        return
     await manager.connect(websocket, "metrics")
     try:
         while True:
@@ -229,6 +263,8 @@ async def websocket_metrics(websocket: WebSocket):
 @app.websocket("/ws/alerts")
 async def websocket_alerts(websocket: WebSocket):
     """WebSocket endpoint for real-time alert streaming."""
+    if not await _authenticate_websocket(websocket):
+        return
     await manager.connect(websocket, "alerts")
     try:
         while True:
@@ -240,6 +276,8 @@ async def websocket_alerts(websocket: WebSocket):
 @app.websocket("/ws/ctf")
 async def websocket_ctf(websocket: WebSocket):
     """WebSocket endpoint for CTF scoreboard updates."""
+    if not await _authenticate_websocket(websocket):
+        return
     await manager.connect(websocket, "ctf")
     try:
         while True:

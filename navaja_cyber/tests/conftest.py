@@ -66,7 +66,9 @@ async def client(db_session) -> AsyncGenerator[AsyncClient, None]:
 
     app.dependency_overrides[get_db] = override_get_db
 
-    async with AsyncClient(app=app, base_url="http://test") as ac:
+    # base_url host must be present in settings.allowed_hosts so the
+    # TrustedHostMiddleware accepts the request (localhost is allowed by default).
+    async with AsyncClient(app=app, base_url="http://localhost") as ac:
         yield ac
 
     app.dependency_overrides.clear()

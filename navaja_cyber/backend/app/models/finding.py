@@ -49,7 +49,8 @@ class Finding(Base):
     cwe_id = Column(String(20))
     cve_id = Column(String(50))
     references = Column(JSON, default=list)
-    metadata = Column(JSON, default=dict)
+    # NOTE: attribute name avoids SQLAlchemy's reserved ``metadata``; DB column stays "extra_metadata".
+    extra_metadata = Column("extra_metadata", JSON, default=dict)
     false_positive_reason = Column(Text)
     assigned_to = Column(UUID(as_uuid=True))
     resolved_at = Column(DateTime)

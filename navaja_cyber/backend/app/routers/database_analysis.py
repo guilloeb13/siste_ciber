@@ -4,15 +4,24 @@ from datetime import datetime
 from typing import Annotated
 from uuid import UUID, uuid4
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.models.user import User, Role
 from backend.app.routers.auth import get_current_user, require_role
+from backend.app.security import is_disallowed_target_host
 from backend.app.services.database import get_db
 
+logger = structlog.get_logger(__name__)
 router = APIRouter()
+
+# Valid libpq sslmode values; "prefer" and weaker do not verify the server
+# certificate, so verify-full is recommended for sensitive databases.
+_ALLOWED_SSL_MODES = {
+    "disable", "allow", "prefer", "require", "verify-ca", "verify-full",
+}
 
 
 class DatabaseConnection(BaseModel):
@@ -85,6 +94,19 @@ async def analyze_database(
     - logs: SQL injection pattern detection in query logs
     """
     analysis_id = uuid4()
+
+    conn = request.connection
+    # SSRF mitigation: never let the platform be coerced into connecting to its
+    # own loopback interface or the cloud metadata endpoint.
+    if is_disallowed_target_host(conn.host, block_private=False):
+        raise HTTPException(
+            status_code=400,
+            detail="Target host is not permitted for database analysis.",
+        )
+    if conn.ssl_mode not in _ALLOWED_SSL_MODES:
+        raise HTTPException(status_code=400, detail="Invalid ssl_mode.")
+    if not (0 < conn.port < 65536):
+        raise HTTPException(status_code=400, detail="Invalid port.")
 
     # Perform analysis based on database type
     if request.connection.db_type == "postgres":
@@ -229,10 +251,13 @@ async def analyze_postgres(conn: DatabaseConnection, checks: list[str]) -> dict:
         await connection.close()
 
     except Exception as e:
+        # Log full detail server-side; return a generic message to the client
+        # to avoid leaking internal hostnames, credentials, or network layout.
+        logger.error("db_analysis_connection_failed", host=conn.host, error=str(e))
         config_issues.append(ConfigIssue(
             check="connection",
             severity="critical",
-            description=f"Failed to connect to database: {str(e)}",
+            description="Failed to connect to database.",
             recommendation="Verify connection parameters and network access",
         ))
 

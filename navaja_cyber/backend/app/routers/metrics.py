@@ -9,8 +9,10 @@ from pydantic import BaseModel
 from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.models.agent import Agent
 from backend.app.models.metric import Metric, MetricType
 from backend.app.models.user import User
+from backend.app.routers.agents import authenticate_agent
 from backend.app.routers.auth import get_current_user
 from backend.app.services.database import get_db
 
@@ -18,7 +20,9 @@ router = APIRouter()
 
 
 class MetricCreate(BaseModel):
-    agent_id: UUID
+    # agent_id is optional and ignored on ingestion: metrics are attributed to
+    # the authenticated agent, not to a client-supplied id (anti-spoofing).
+    agent_id: UUID | None = None
     metric_type: MetricType
     name: str
     value: float
@@ -59,11 +63,12 @@ class MetricSummary(BaseModel):
 @router.post("/", response_model=dict)
 async def create_metric(
     metric_data: MetricCreate,
-    db: Annotated[AsyncSession, Depends(get_db)]
+    db: Annotated[AsyncSession, Depends(get_db)],
+    agent: Annotated[Agent, Depends(authenticate_agent)],
 ):
-    """Record a single metric from an agent."""
+    """Record a single metric from an authenticated agent."""
     metric = Metric(
-        agent_id=metric_data.agent_id,
+        agent_id=agent.id,
         metric_type=metric_data.metric_type,
         name=metric_data.name,
         value=metric_data.value,
@@ -78,16 +83,26 @@ async def create_metric(
     return {"status": "ok", "metric_id": str(metric.id)}
 
 
+# Cap batch size to bound memory/DB load from a single request.
+MAX_BATCH_METRICS = 1000
+
+
 @router.post("/batch", response_model=dict)
 async def create_metrics_batch(
     batch: MetricBatch,
-    db: Annotated[AsyncSession, Depends(get_db)]
+    db: Annotated[AsyncSession, Depends(get_db)],
+    agent: Annotated[Agent, Depends(authenticate_agent)],
 ):
-    """Record multiple metrics from an agent in a single request."""
+    """Record multiple metrics from an authenticated agent in a single request."""
+    if len(batch.metrics) > MAX_BATCH_METRICS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Batch too large (max {MAX_BATCH_METRICS} metrics)",
+        )
     metrics = []
     for metric_data in batch.metrics:
         metric = Metric(
-            agent_id=metric_data.agent_id,
+            agent_id=agent.id,
             metric_type=metric_data.metric_type,
             name=metric_data.name,
             value=metric_data.value,
