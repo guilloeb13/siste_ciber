@@ -70,6 +70,11 @@ class Settings(BaseSettings):
     # Honour X-Forwarded-For (only enable behind a trusted reverse proxy).
     rate_limit_trust_forwarded: bool = False
 
+    # Account lockout (per-username failed-login throttle; requires Redis).
+    lockout_enabled: bool = True
+    lockout_max_attempts: int = 10
+    lockout_window_seconds: int = 900  # 15 minutes
+
     # Database
     database_url: str = "postgresql+asyncpg://navaja:navaja_secret@localhost:5432/navaja_cyber"
     database_pool_size: int = 10
@@ -100,8 +105,15 @@ class Settings(BaseSettings):
     # Forensic
     forensic_hash_algorithm: str = "sha256"
     evidence_retention_days: int = 90
+    # Max size (MB) accepted for a single uploaded evidence file.
+    evidence_max_mb: int = 2048
 
     # CTF
+    # Dedicated Docker endpoint for launching challenge containers. Point this
+    # at an isolated / rootless / Sysbox daemon (e.g. "tcp://ctf-docker:2376")
+    # instead of sharing the host's root docker.sock with the API. Empty falls
+    # back to the ambient DOCKER_HOST / local socket (development only).
+    ctf_docker_host: str = ""
     ctf_docker_network: str = "navaja-ctf-net"
     ctf_challenge_timeout: int = 3600
     ctf_flag_prefix: str = "NAVAJA{"

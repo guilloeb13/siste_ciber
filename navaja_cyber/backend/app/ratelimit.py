@@ -33,12 +33,17 @@ def _client_key(request: Request) -> str:
 
 # Empty storage_uri => in-memory (single worker). Provide a redis:// URI in
 # production multi-worker deployments for globally-consistent limits.
+# NOTE: headers_enabled is intentionally False. When True, slowapi injects
+# X-RateLimit-* headers by requiring every decorated endpoint to accept a
+# `response: Response` parameter; endpoints returning Pydantic models (most of
+# ours) would raise at runtime once the limiter is enabled. Enforcement (429)
+# works regardless of this flag.
 limiter = Limiter(
     key_func=_client_key,
     enabled=settings.rate_limit_enabled,
     storage_uri=settings.rate_limit_storage_uri or "memory://",
     default_limits=[lambda: f"{settings.rate_limit_default}/minute"],
-    headers_enabled=True,
+    headers_enabled=False,
 )
 
 

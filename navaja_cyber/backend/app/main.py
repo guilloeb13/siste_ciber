@@ -95,7 +95,8 @@ async def _authenticate_websocket(websocket: WebSocket) -> bool:
     the short-lived access token is passed as a query parameter. Closes the
     socket with policy-violation (1008) when the token is missing or invalid.
     """
-    from jose import JWTError, jwt
+    import jwt
+    from jwt import PyJWTError
 
     token = websocket.query_params.get("token")
     if not token:
@@ -103,7 +104,7 @@ async def _authenticate_websocket(websocket: WebSocket) -> bool:
         return False
     try:
         jwt.decode(token, settings.secret_key, algorithms=[settings.jwt_algorithm])
-    except JWTError:
+    except PyJWTError:
         await websocket.close(code=1008)
         return False
     return True
@@ -122,6 +123,8 @@ async def lifespan(app: FastAPI):
     # Initialize Redis
     redis_service = RedisService(settings.redis_url)
     await redis_service.connect()
+    # Expose Redis to request handlers (used by account-lockout).
+    app.state.redis = redis_service
 
     # Start metric subscriber
     asyncio.create_task(metric_subscriber())
@@ -198,6 +201,28 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )
+
+
+@app.middleware("http")
+async def security_headers(request, call_next):
+    """Attach hardening response headers to every HTTP response."""
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'none'; frame-ancestors 'none'; base-uri 'none'",
+    )
+    response.headers.setdefault(
+        "Permissions-Policy", "geolocation=(), microphone=(), camera=()"
+    )
+    # HSTS only makes sense over TLS; enable outside development.
+    if settings.app_env != "development":
+        response.headers.setdefault(
+            "Strict-Transport-Security", "max-age=63072000; includeSubDomains"
+        )
+    return response
 
 
 # Include routers

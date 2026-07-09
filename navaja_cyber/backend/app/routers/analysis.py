@@ -18,10 +18,12 @@ from backend.app.models.user import User
 from backend.app.ratelimit import limiter, scan_limit
 from backend.app.routers.auth import get_current_user
 from backend.app.security import (
+    UploadTooLarge,
     ValidationError,
     resolve_within,
     safe_zip_members,
     sanitize_filename,
+    stream_upload_to_path,
     validate_git_ref,
     validate_git_url,
 )
@@ -269,29 +271,29 @@ async def upload_and_scan(
 
     Max file size: 500MB (configurable)
     """
-    # Check file size
-    content = await file.read()
-    size_mb = len(content) / (1024 * 1024)
-
-    if size_mb > settings.max_repo_size_mb:
-        raise HTTPException(
-            status_code=400,
-            detail=f"File too large. Max size: {settings.max_repo_size_mb}MB"
-        )
-
     # Sanitize the client-supplied filename to a bare basename (no traversal).
     try:
         safe_name = sanitize_filename(file.filename or "upload.zip")
     except ValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    # Save to temp file
+    # Stream the upload to disk with a hard size cap instead of buffering the
+    # whole (up to hundreds of MB) file in memory.
     scan_id = uuid4()
     temp_dir = tempfile.mkdtemp(prefix=f"navaja_upload_{scan_id}_")
     zip_path = Path(temp_dir) / safe_name
+    max_bytes = settings.max_repo_size_mb * 1024 * 1024
 
-    with open(zip_path, "wb") as f:
-        f.write(content)
+    try:
+        info = await stream_upload_to_path(file, str(zip_path), max_bytes)
+    except UploadTooLarge:
+        import shutil
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large. Max size: {settings.max_repo_size_mb}MB",
+        )
+    size_mb = info["size"] / (1024 * 1024)
 
     # Extract if zip, guarding against Zip Slip (path traversal) and zip bombs.
     extract_dir = Path(temp_dir) / "extracted"

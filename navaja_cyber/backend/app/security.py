@@ -6,11 +6,11 @@ and are covered by a single set of tests.
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import re
 import socket
 from pathlib import Path
-from urllib.parse import urlparse
 
 # Git URLs we are willing to clone. Anything else is rejected before it can
 # reach a subprocess argument list.
@@ -128,3 +128,49 @@ def is_disallowed_target_host(host: str, *, block_private: bool = True) -> bool:
         if block_private and ip.is_private:
             return True
     return False
+
+
+class UploadTooLarge(ValidationError):
+    """Raised when a streamed upload exceeds the configured maximum size."""
+
+
+async def stream_upload_to_path(
+    upload, dest_path: str, max_bytes: int, chunk_size: int = 1024 * 1024
+) -> dict:
+    """Stream a Starlette/FastAPI UploadFile to disk without buffering it all.
+
+    Reads in ``chunk_size`` blocks, aborting (and removing the partial file) as
+    soon as the total exceeds ``max_bytes``. Computes SHA-256/MD5 incrementally
+    and captures the first bytes for MIME sniffing. Returns a dict with
+    ``size``, ``sha256``, ``md5`` and ``head`` (first up to 2048 bytes).
+    """
+    sha256 = hashlib.sha256()
+    md5 = hashlib.md5()
+    total = 0
+    head = b""
+    dest = Path(dest_path)
+    try:
+        with open(dest, "wb") as out:
+            while True:
+                chunk = await upload.read(chunk_size)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    raise UploadTooLarge(
+                        f"upload exceeds maximum size of {max_bytes} bytes"
+                    )
+                if len(head) < 2048:
+                    head += chunk[: 2048 - len(head)]
+                sha256.update(chunk)
+                md5.update(chunk)
+                out.write(chunk)
+    except UploadTooLarge:
+        dest.unlink(missing_ok=True)
+        raise
+    return {
+        "size": total,
+        "sha256": sha256.hexdigest(),
+        "md5": md5.hexdigest(),
+        "head": head,
+    }

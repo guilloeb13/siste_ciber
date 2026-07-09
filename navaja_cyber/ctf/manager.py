@@ -26,8 +26,13 @@ logger = structlog.get_logger(__name__)
 class ChallengeManager:
     """Manage CTF challenges using Docker containers."""
 
-    def __init__(self, network_name: str = "navaja-ctf-net"):
-        self.docker_client = docker.from_env()
+    def __init__(self, network_name: str = "navaja-ctf-net", docker_host: str | None = None):
+        # Prefer a dedicated/isolated Docker endpoint (rootless / Sysbox / remote)
+        # over the host's root socket when one is provided.
+        if docker_host:
+            self.docker_client = docker.DockerClient(base_url=docker_host)
+        else:
+            self.docker_client = docker.from_env()
         self.network_name = network_name
         self._ensure_network()
 

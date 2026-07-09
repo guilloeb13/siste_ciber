@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.config import settings
 from backend.app.models.user import User, Role
 from backend.app.routers.auth import get_current_user, require_role
+from backend.app.security import UploadTooLarge, sanitize_filename, stream_upload_to_path
 from backend.app.services.database import get_db
 
 router = APIRouter()
@@ -77,23 +78,38 @@ async def collect_evidence(
     """
     evidence_id = uuid4()
 
-    # Read file content
-    content = await file.read()
-    file_size = len(content)
+    # Sanitize the client-supplied filename before it becomes a storage key.
+    safe_name = sanitize_filename(file.filename or "evidence.bin")
 
-    # Compute hashes for integrity
-    sha256_hash = hashlib.sha256(content).hexdigest()
-    md5_hash = hashlib.md5(content).hexdigest()
+    # Stream the (potentially very large) evidence file to a temp file with a
+    # size cap, computing integrity hashes incrementally — never buffer it all
+    # in memory. The temp file is the source of truth for the upload.
+    tmp_dir = tempfile.mkdtemp(prefix="navaja_evidence_")
+    tmp_path = Path(tmp_dir) / safe_name
+    max_bytes = settings.evidence_max_mb * 1024 * 1024
+    try:
+        info = await stream_upload_to_path(file, str(tmp_path), max_bytes)
+    except UploadTooLarge:
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise HTTPException(
+            status_code=413,
+            detail=f"Evidence file too large. Max size: {settings.evidence_max_mb}MB",
+        )
 
-    # Determine MIME type
+    file_size = info["size"]
+    sha256_hash = info["sha256"]
+    md5_hash = info["md5"]
+
+    # Determine MIME type from the captured header bytes.
     import magic
-    mime_type = magic.from_buffer(content, mime=True)
+    mime_type = magic.from_buffer(info["head"], mime=True)
 
     # Generate storage path
     timestamp = datetime.utcnow().strftime("%Y/%m/%d")
-    storage_path = f"{metadata.case_id}/{timestamp}/{evidence_id}/{file.filename}"
+    storage_path = f"{metadata.case_id}/{timestamp}/{evidence_id}/{safe_name}"
 
-    # Upload to MinIO/S3
+    # Upload to MinIO/S3 straight from disk (streams; bounded memory).
     try:
         from minio import Minio
 
@@ -108,34 +124,40 @@ async def collect_evidence(
         if not client.bucket_exists(settings.minio_bucket_evidence):
             client.make_bucket(settings.minio_bucket_evidence)
 
-        # Upload with metadata
-        from io import BytesIO
-        client.put_object(
-            settings.minio_bucket_evidence,
-            storage_path,
-            BytesIO(content),
-            file_size,
-            content_type=mime_type,
-            metadata={
-                "case_id": metadata.case_id,
-                "sha256": sha256_hash,
-                "collected_by": metadata.collected_by,
-            }
-        )
+        with open(tmp_path, "rb") as fh:
+            client.put_object(
+                settings.minio_bucket_evidence,
+                storage_path,
+                fh,
+                file_size,
+                content_type=mime_type,
+                metadata={
+                    "case_id": metadata.case_id,
+                    "sha256": sha256_hash,
+                    "collected_by": metadata.collected_by,
+                }
+            )
 
     except Exception as e:
         # Fallback to local storage in simulation mode
         if settings.simulation_mode:
             local_path = Path(tempfile.gettempdir()) / "navaja_evidence" / storage_path
             local_path.parent.mkdir(parents=True, exist_ok=True)
-            local_path.write_bytes(content)
+            local_path.write_bytes(tmp_path.read_bytes())
         else:
-            raise HTTPException(status_code=500, detail=f"Storage error: {str(e)}")
+            import structlog
+            structlog.get_logger(__name__).error("evidence_storage_error", error=str(e))
+            import shutil
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise HTTPException(status_code=500, detail="Evidence storage error")
+    finally:
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
     return EvidenceRecord(
         evidence_id=evidence_id,
         case_id=metadata.case_id,
-        filename=file.filename,
+        filename=safe_name,
         file_size=file_size,
         sha256_hash=sha256_hash,
         md5_hash=md5_hash,

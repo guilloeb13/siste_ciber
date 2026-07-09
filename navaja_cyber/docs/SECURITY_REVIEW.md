@@ -37,10 +37,12 @@ impacto y añade controles de defensa en profundidad y pruebas de regresión.
 | 14 | **Media** | Falta `TrustedHostMiddleware` (Host header / DNS rebinding) | ✅ Corregida |
 | 15 | **Media** | Sin política de contraseñas (longitud mínima) | ✅ Corregida |
 | 16 | **Media** | Rate limiting configurado pero **nunca aplicado** (fuerza bruta) | ✅ Corregida |
-| 17 | **Media** | Docker socket = root en host (diseño CTF) | ⚠️ Recomendación |
-| 18 | **Baja** | `passlib` + `bcrypt 4.x` incompatibles; sin fijado de dependencias | ⚠️ Recomendación |
+| 17 | **Media** | Docker socket = root en host (diseño CTF) | ✅ Mitigada (endpoint dedicado) |
+| 18 | **Baja** | `python-jose`/`passlib` sin mantenimiento; sin fijado de dependencias | ✅ Corregida (PyJWT + Argon2) |
 | 19 | **Baja** | Puertos de datos expuestos y credenciales por defecto en compose | ⚠️ Solo-dev |
-| 20 | **Baja** | Carga de archivo completo en memoria (`await file.read()`) → DoS | ⚠️ Recomendación |
+| 20 | **Baja** | Carga de archivo completo en memoria (`await file.read()`) → DoS | ✅ Corregida (streaming) |
+| 21 | **Media** | Sin bloqueo temporal de cuenta tras fallos de login | ✅ Corregida |
+| 22 | **Baja** | Faltaban cabeceras de seguridad HTTP (CSP/HSTS/nosniff/frame) | ✅ Corregida |
 
 ---
 
@@ -164,40 +166,55 @@ contadores compartidos. Test: `test_login_is_rate_limited`.
 > adicional (defensa en profundidad) sigue recomendándose un **bloqueo temporal
 > de cuenta** tras N fallos de login por usuario (contador en Redis).
 
+### 17. Aislamiento del runtime de CTF (Media) — ✅ Mitigada
+Se añadió `CTF_DOCKER_HOST` (`config.py`) y tanto `routers/ctf.py` como
+`ctf/manager.py` usan `docker.DockerClient(base_url=...)` para apuntar a un
+daemon **dedicado/aislado** (rootless / Sysbox / gVisor / remoto) en lugar del
+socket root del host. Sigue siendo responsabilidad operativa aprovisionar ese
+daemon aislado; el código ya no obliga a compartir `docker.sock` con la API, y
+los contenedores se lanzan con `cap_drop=ALL`, `no-new-privileges` y límites.
+
+### 18. Cadena de suministro / dependencias (Baja) — ✅ Corregida
+- Migrado de `python-jose` a **PyJWT** y de `passlib[bcrypt]` a **Argon2id**
+  (`argon2-cffi`) mediante `backend/app/hashing.py`. Elimina la incompatibilidad
+  con `bcrypt >= 4.1`, el límite de 72 bytes y dependencias sin mantenimiento.
+- `pip-audit --strict` ahora **falla** el CI ante dependencias vulnerables
+  (antes `|| true`); Bandit cubre todos los paquetes. Recomendación restante:
+  fijar versiones con lockfile y firmar imágenes / SBOM.
+
+### 20. Subidas por *streaming* (Baja) — ✅ Corregida
+`stream_upload_to_path` (`security.py`) transmite la subida a disco por *chunks*
+con corte temprano al superar el límite, calculando hashes de forma incremental.
+Aplicado en `analysis.upload_and_scan` (límite `MAX_REPO_SIZE_MB`, 413 si excede)
+y en `forensic.collect_evidence` (`EVIDENCE_MAX_MB`, subida a MinIO desde disco).
+
+### 21. Bloqueo temporal de cuenta (Media) — ✅ Corregida
+`backend/app/lockout.py` (respaldado por Redis) bloquea temporalmente una cuenta
+tras `LOCKOUT_MAX_ATTEMPTS` fallos dentro de `LOCKOUT_WINDOW_SECONDS`. Se integra
+en `/auth/token`; degrada a *no-op* si Redis no está disponible (el rate limiting
+sigue protegiendo). Tests: `TestLockout`.
+
+### 22. Cabeceras de seguridad HTTP (Baja) — ✅ Corregida
+Middleware en `main.py` que añade `X-Content-Type-Options: nosniff`,
+`X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, una CSP restrictiva,
+`Permissions-Policy` y `Strict-Transport-Security` (fuera de desarrollo). Test:
+`test_security_headers_present`.
+
 ## Pendiente / recomendaciones (requieren decisión)
-
-### 17. Aislamiento del runtime de CTF (Media)
-El diseño usa `docker.from_env()`, lo que implica montar el socket de Docker =
-**root en el host**. Para grado militar: usar un runtime sin privilegios
-(Sysbox, gVisor o Kata), o un daemon Docker remoto/rootless dedicado, nunca el
-socket del host en el mismo plano que la API. Mantener la red CTF `internal`.
-
-### 18. Cadena de suministro / dependencias (Baja)
-- `python-jose` y `passlib` están **sin mantenimiento activo**; `passlib` es
-  incompatible con `bcrypt >= 4.1`. Recomendación: migrar a `PyJWT` y
-  `bcrypt`/`argon2-cffi` directamente.
-- Fijar versiones (lockfile) y ejecutar `pip-audit` en CI con `--strict`
-  (hoy usa `|| true`). Firmar imágenes y usar SBOM.
 
 ### 19. Endurecer `docker-compose` para producción (Baja / solo-dev)
 El compose actual es de desarrollo: expone Postgres/Redis/MinIO al host y usa
 credenciales por defecto (`minioadmin`, `navaja_secret`). No usar tal cual en
 producción; parametrizar todo por secretos y no publicar puertos de datos.
 
-### 20. Límite de tamaño en subidas por *streaming* (Baja)
-`upload_and_scan` y `collect_evidence` hacen `await file.read()` cargando el
-archivo completo en memoria antes de validar el tamaño → DoS de memoria.
-Recomendación: leer por *chunks* con corte temprano al superar el límite.
-
-### Otras buenas prácticas sugeridas
-- **Cabeceras de seguridad** (HSTS, `X-Content-Type-Options`, CSP) vía middleware.
+### Otras buenas prácticas sugeridas (backlog)
 - **Auditoría inmutable**: registrar acciones sensibles (login, cambios de rol,
   exportación de evidencia) con cadena de custodia verificable.
-- **Revocación de JWT** (lista de revocación en Redis) y expiración corta +
-  *refresh tokens*.
+- **Revocación de JWT** (lista de revocación en Redis) y *refresh tokens*.
 - **Cifrado en reposo** de evidencia forense y de columnas PII detectadas.
 - **`is_verified`** del usuario no se aplica en el login; considerar exigir
   verificación de correo antes de activar la cuenta.
+- **Lockfile y SBOM** para fijar por completo la cadena de suministro.
 
 ---
 

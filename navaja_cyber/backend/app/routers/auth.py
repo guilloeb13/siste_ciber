@@ -4,30 +4,31 @@ from datetime import datetime, timedelta, timezone
 from typing import Annotated
 from uuid import UUID
 
+import jwt
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from jose import JWTError, jwt
-from passlib.context import CryptContext
+from jwt import PyJWTError
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.config import settings
+from backend.app.hashing import hash_secret, verify_secret
+from backend.app.lockout import clear_failures, is_locked_out, record_failure
 from backend.app.models.user import User, Role
 from backend.app.ratelimit import auth_limit, limiter, register_limit
 from backend.app.services.database import get_db
 
 router = APIRouter()
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/token")
 
 
 class UserCreate(BaseModel):
     username: str = Field(min_length=3, max_length=100)
     email: EmailStr
-    # Enforce a minimum password length at the edge. bcrypt caps input at 72
-    # bytes, so cap here to give a clear error instead of silent truncation.
-    password: str = Field(min_length=12, max_length=72)
+    # Enforce a minimum password length at the edge. Argon2id has no practical
+    # input cap; bound the max to avoid abusive payloads.
+    password: str = Field(min_length=12, max_length=128)
     # NOTE: role is intentionally NOT accepted from the client. Privileged roles
     # are assigned by an administrator via /users/{id}/role. Allowing the client
     # to choose its own role was a privilege-escalation vulnerability.
@@ -60,11 +61,11 @@ class TokenData(BaseModel):
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
+    return verify_secret(hashed_password, plain_password)
 
 
 def get_password_hash(password: str) -> str:
-    return pwd_context.hash(password)
+    return hash_secret(password)
 
 
 def create_access_token(data: dict, expires_delta: timedelta | None = None) -> str:
@@ -91,10 +92,17 @@ async def get_current_user(
         user_id: str = payload.get("sub")
         if user_id is None:
             raise credentials_exception
-    except JWTError:
+    except PyJWTError:
         raise credentials_exception
 
-    result = await db.execute(select(User).where(User.id == user_id))
+    # The JWT subject is a stringified UUID; cast it back so the comparison is
+    # database-agnostic (a raw string fails against a UUID column on some DBs).
+    try:
+        user_uuid = UUID(user_id)
+    except (ValueError, TypeError):
+        raise credentials_exception
+
+    result = await db.execute(select(User).where(User.id == user_uuid))
     user = result.scalar_one_or_none()
 
     if user is None or not user.is_active:
@@ -179,10 +187,21 @@ async def login(
     db: Annotated[AsyncSession, Depends(get_db)]
 ):
     """Login and get access token."""
+    redis = getattr(request.app.state, "redis", None)
+
+    # Defense-in-depth beyond rate limiting: temporarily lock an account after
+    # too many failed attempts (keyed by username). No-op when Redis is absent.
+    if await is_locked_out(redis, form_data.username):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Account temporarily locked due to failed login attempts. Try again later.",
+        )
+
     result = await db.execute(select(User).where(User.username == form_data.username))
     user = result.scalar_one_or_none()
 
     if not user or not verify_password(form_data.password, user.password_hash):
+        await record_failure(redis, form_data.username)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
@@ -191,6 +210,9 @@ async def login(
 
     if not user.is_active:
         raise HTTPException(status_code=400, detail="User account is disabled")
+
+    # Successful auth clears the failure counter.
+    await clear_failures(redis, form_data.username)
 
     # Update last login
     user.last_login = datetime.utcnow()

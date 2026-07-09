@@ -104,13 +104,13 @@ jobs:
           pip install bandit pip-audit
 
       - name: Run Bandit
-        run: bandit -r backend/ -ll -f json -o bandit-report.json || true
+        run: bandit -r backend/ analysis/ ctf/ forensic/ agents/ -ll -f json -o bandit-report.json
 
-      - name: Run pip-audit
-        run: pip-audit || true
+      - name: Run pip-audit (fails on known vulnerable dependencies)
+        run: pip-audit --strict
 
       - name: Upload Bandit report
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: bandit-report
           path: bandit-report.json

@@ -211,7 +211,11 @@ async def activate_challenge(
     if challenge.docker_image:
         try:
             import docker
-            client = docker.from_env()
+            # Prefer a dedicated/isolated Docker endpoint over the host socket.
+            if settings.ctf_docker_host:
+                client = docker.DockerClient(base_url=settings.ctf_docker_host)
+            else:
+                client = docker.from_env()
 
             # Pull image if needed
             client.images.pull(challenge.docker_image)

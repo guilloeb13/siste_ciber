@@ -6,12 +6,12 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
-from passlib.context import CryptContext
 from pydantic import BaseModel
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.config import settings
+from backend.app.hashing import dummy_verify, hash_secret, verify_secret
 from backend.app.models.agent import Agent, AgentStatus
 from backend.app.models.user import User, Role
 from backend.app.ratelimit import limiter, register_limit
@@ -19,7 +19,6 @@ from backend.app.routers.auth import get_current_user, require_role
 from backend.app.services.database import get_db
 
 router = APIRouter()
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 async def authenticate_agent(
@@ -47,10 +46,10 @@ async def authenticate_agent(
     result = await db.execute(select(Agent).where(Agent.id == agent_uuid))
     agent = result.scalar_one_or_none()
     if agent is None or not agent.enabled:
-        # Still run a verify to reduce user-enumeration timing differences.
-        pwd_context.dummy_verify()
+        # Still run a verify to reduce agent-enumeration timing differences.
+        dummy_verify()
         raise invalid
-    if not pwd_context.verify(x_agent_token, agent.token_hash):
+    if not verify_secret(agent.token_hash, x_agent_token):
         raise invalid
     return agent
 
@@ -114,7 +113,7 @@ async def register_agent(
 
     # Generate secure token
     token = secrets.token_urlsafe(32)
-    token_hash = pwd_context.hash(token)
+    token_hash = hash_secret(token)
 
     agent = Agent(
         name=agent_data.name,

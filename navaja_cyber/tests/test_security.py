@@ -130,6 +130,35 @@ async def test_registration_ignores_client_role(client):
 
 
 @pytest.mark.asyncio
+async def test_full_auth_flow_with_jwt(client):
+    """register -> token -> authenticated /me works end to end (PyJWT + argon2)."""
+    reg = await client.post(
+        "/api/auth/register",
+        json={
+            "username": "commander",
+            "email": "commander@navaja.mil",
+            "password": "correct horse battery staple",
+        },
+    )
+    assert reg.status_code == 200, reg.text
+
+    tok = await client.post(
+        "/api/auth/token",
+        data={"username": "commander", "password": "correct horse battery staple"},
+    )
+    assert tok.status_code == 200, tok.text
+    access = tok.json()["access_token"]
+
+    me = await client.get("/api/auth/me", headers={"Authorization": f"Bearer {access}"})
+    assert me.status_code == 200, me.text
+    assert me.json()["username"] == "commander"
+
+    # Wrong/garbage token is rejected.
+    bad = await client.get("/api/auth/me", headers={"Authorization": "Bearer nope"})
+    assert bad.status_code == 401
+
+
+@pytest.mark.asyncio
 async def test_metrics_ingestion_requires_agent_auth(client, sample_metric_data):
     """Posting metrics without agent credentials must be rejected."""
     resp = await client.post("/api/metrics/batch", json={"metrics": [sample_metric_data]})
@@ -143,6 +172,93 @@ async def test_password_minimum_length_enforced(client):
         json={"username": "shorty", "email": "s@example.com", "password": "short"},
     )
     assert resp.status_code == 422
+
+
+class TestHashing:
+    def test_argon2_roundtrip(self):
+        from backend.app.hashing import hash_secret, verify_secret
+
+        h = hash_secret("a-strong-password")
+        assert h.startswith("$argon2")
+        assert verify_secret(h, "a-strong-password") is True
+        assert verify_secret(h, "wrong") is False
+
+    def test_verify_never_raises_on_garbage(self):
+        from backend.app.hashing import verify_secret
+
+        assert verify_secret("not-a-hash", "x") is False
+
+
+class _FakeRedisClient:
+    def __init__(self):
+        self.store = {}
+    async def incr(self, k):
+        self.store[k] = int(self.store.get(k, 0)) + 1
+        return self.store[k]
+    async def expire(self, k, ttl):
+        return True
+
+
+class _FakeRedis:
+    def __init__(self):
+        self.client = _FakeRedisClient()
+    async def get(self, k):
+        return self.client.store.get(k)
+    async def delete(self, k):
+        self.client.store.pop(k, None)
+
+
+class TestLockout:
+    @pytest.mark.asyncio
+    async def test_locks_after_threshold(self):
+        from backend.app import lockout
+        from backend.app.config import settings
+
+        redis = _FakeRedis()
+        settings.lockout_max_attempts = 3
+        assert await lockout.is_locked_out(redis, "user") is False
+        for _ in range(3):
+            await lockout.record_failure(redis, "user")
+        assert await lockout.is_locked_out(redis, "user") is True
+        # A successful login clears the counter.
+        await lockout.clear_failures(redis, "user")
+        assert await lockout.is_locked_out(redis, "user") is False
+
+    @pytest.mark.asyncio
+    async def test_no_redis_is_noop(self):
+        from backend.app import lockout
+
+        assert await lockout.is_locked_out(None, "user") is False
+        await lockout.record_failure(None, "user")  # must not raise
+
+
+class TestStreamUpload:
+    @pytest.mark.asyncio
+    async def test_rejects_oversize_stream(self, tmp_path):
+        from backend.app.security import UploadTooLarge, stream_upload_to_path
+
+        class _Src:
+            def __init__(self, data):
+                self._data = data
+                self._sent = False
+            async def read(self, n):
+                if self._sent:
+                    return b""
+                self._sent = True
+                return self._data
+
+        dest = tmp_path / "out.bin"
+        with pytest.raises(UploadTooLarge):
+            await stream_upload_to_path(_Src(b"A" * 100), str(dest), max_bytes=10)
+        assert not dest.exists()  # partial file cleaned up
+
+
+@pytest.mark.asyncio
+async def test_security_headers_present(client):
+    resp = await client.get("/health")
+    assert resp.headers.get("X-Content-Type-Options") == "nosniff"
+    assert resp.headers.get("X-Frame-Options") == "DENY"
+    assert "default-src 'none'" in resp.headers.get("Content-Security-Policy", "")
 
 
 @pytest.mark.asyncio
@@ -171,4 +287,31 @@ async def test_login_is_rate_limited(client):
     finally:
         limiter.enabled = original_enabled
         settings.rate_limit_auth = original_limit
+        limiter.reset()
+
+
+@pytest.mark.asyncio
+async def test_limited_endpoint_succeeds_when_enabled(client):
+    """A successful request to a limited endpoint must work with limiter ON.
+
+    Regression guard: slowapi header injection previously crashed model
+    responses when the limiter was enabled.
+    """
+    from backend.app.ratelimit import limiter
+
+    original = limiter.enabled
+    limiter.enabled = True
+    limiter.reset()
+    try:
+        resp = await client.post(
+            "/api/auth/register",
+            json={
+                "username": "enabled_user",
+                "email": "enabled@example.com",
+                "password": "correct horse battery",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+    finally:
+        limiter.enabled = original
         limiter.reset()
