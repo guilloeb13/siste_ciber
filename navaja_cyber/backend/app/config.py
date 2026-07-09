@@ -54,10 +54,21 @@ class Settings(BaseSettings):
     # When set, repository scans by local path are restricted to this directory.
     scan_base_dir: str = ""
 
-    # Rate Limiting
+    # Rate Limiting (requests per minute unless noted)
+    rate_limit_enabled: bool = True
     rate_limit_default: int = 100
     rate_limit_analysis: int = 10
     rate_limit_scan: int = 5
+    # Stricter limits for credential/abuse-sensitive endpoints.
+    rate_limit_auth: int = 5          # login / token
+    rate_limit_register: int = 10     # user & agent registration
+    rate_limit_submit: int = 30       # CTF flag submission
+    # Storage backend for counters. Empty = in-process memory (fine for a
+    # single worker). For multi-worker/instance deployments set a shared store,
+    # e.g. "redis://redis:6379/1", so limits are enforced globally.
+    rate_limit_storage_uri: str = ""
+    # Honour X-Forwarded-For (only enable behind a trusted reverse proxy).
+    rate_limit_trust_forwarded: bool = False
 
     # Database
     database_url: str = "postgresql+asyncpg://navaja:navaja_secret@localhost:5432/navaja_cyber"

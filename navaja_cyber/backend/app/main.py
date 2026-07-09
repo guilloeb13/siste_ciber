@@ -16,8 +16,12 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depe
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 
 from backend.app.config import settings
+from backend.app.ratelimit import limiter
 from backend.app.routers import metrics, findings, analysis, ctf, forensic, auth, agents, database_analysis
 from backend.app.services.redis_service import RedisService
 from backend.app.services.database import init_db, close_db
@@ -169,6 +173,12 @@ app = FastAPI(
     docs_url="/docs" if settings.debug else None,
     redoc_url="/redoc" if settings.debug else None,
 )
+
+# Rate limiting: register the limiter, its 429 handler, and the middleware that
+# enforces the default limits across every route.
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
 
 # Reject requests with an unexpected Host header (defends against Host-header
 # poisoning and DNS-rebinding). "*" only when explicitly configured.

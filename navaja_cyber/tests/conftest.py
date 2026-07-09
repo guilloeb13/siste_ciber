@@ -66,6 +66,11 @@ async def client(db_session) -> AsyncGenerator[AsyncClient, None]:
 
     app.dependency_overrides[get_db] = override_get_db
 
+    # Disable rate limiting by default so cumulative request counts across the
+    # suite don't cause flaky 429s. The dedicated rate-limit test re-enables it.
+    from backend.app.ratelimit import limiter
+    limiter.enabled = False
+
     # base_url host must be present in settings.allowed_hosts so the
     # TrustedHostMiddleware accepts the request (localhost is allowed by default).
     async with AsyncClient(app=app, base_url="http://localhost") as ac:

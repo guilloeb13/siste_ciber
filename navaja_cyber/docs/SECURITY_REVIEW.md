@@ -36,7 +36,7 @@ impacto y añade controles de defensa en profundidad y pruebas de regresión.
 | 13 | **Media** | Comparación de flag no constante (timing) | ✅ Corregida |
 | 14 | **Media** | Falta `TrustedHostMiddleware` (Host header / DNS rebinding) | ✅ Corregida |
 | 15 | **Media** | Sin política de contraseñas (longitud mínima) | ✅ Corregida |
-| 16 | **Media** | Rate limiting configurado pero **nunca aplicado** (fuerza bruta) | ⚠️ Pendiente |
+| 16 | **Media** | Rate limiting configurado pero **nunca aplicado** (fuerza bruta) | ✅ Corregida |
 | 17 | **Media** | Docker socket = root en host (diseño CTF) | ⚠️ Recomendación |
 | 18 | **Baja** | `passlib` + `bcrypt 4.x` incompatibles; sin fijado de dependencias | ⚠️ Recomendación |
 | 19 | **Baja** | Puertos de datos expuestos y credenciales por defecto en compose | ⚠️ Solo-dev |
@@ -149,13 +149,22 @@ orígenes; métodos/cabeceras acotados. Se añadió `TrustedHostMiddleware` con
 
 ---
 
-## Pendiente / recomendaciones (requieren decisión)
+### 16. Rate limiting aplicado (Media) — ✅ Corregida
+Se integró `slowapi` (`backend/app/ratelimit.py`) y se registró el limitador,
+su handler 429 y el middleware en `main.py`. Se aplican límites estrictos por
+cliente en los endpoints sensibles: `/auth/token` (`RATE_LIMIT_AUTH`, 5/min por
+defecto), `/auth/register` y `/agents/register` (`RATE_LIMIT_REGISTER`),
+`/ctf/submit` (`RATE_LIMIT_SUBMIT`) y `/analysis/scan|upload`
+(`RATE_LIMIT_SCAN`), además de un límite por defecto global. La clave de cuenta
+usa la IP del cliente (o `X-Forwarded-For` solo si se confía en el proxy). Para
+despliegues multi-worker, configurar `RATE_LIMIT_STORAGE_URI=redis://...` para
+contadores compartidos. Test: `test_login_is_rate_limited`.
 
-### 16. Aplicar rate limiting (Media)
-`RATE_LIMIT_*` existe en config pero **no está conectado**. `login` y `submit`
-de flags son vulnerables a fuerza bruta. Recomendación: integrar `slowapi`
-(o un middleware Redis) y aplicar límites estrictos en `/auth/token`,
-`/ctf/submit` y `/agents/register`. Añadir bloqueo temporal de cuenta.
+> Nota: el rate limiting reduce la fuerza bruta a nivel de red. Como refuerzo
+> adicional (defensa en profundidad) sigue recomendándose un **bloqueo temporal
+> de cuenta** tras N fallos de login por usuario (contador en Redis).
+
+## Pendiente / recomendaciones (requieren decisión)
 
 ### 17. Aislamiento del runtime de CTF (Media)
 El diseño usa `docker.from_env()`, lo que implica montar el socket de Docker =

@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.config import settings
 from backend.app.models.user import User, Role
+from backend.app.ratelimit import auth_limit, limiter, register_limit
 from backend.app.services.database import get_db
 
 router = APIRouter()
@@ -115,7 +116,12 @@ def require_role(allowed_roles: list[Role]):
 
 
 @router.post("/register", response_model=UserResponse)
-async def register(user_data: UserCreate, db: Annotated[AsyncSession, Depends(get_db)]):
+@limiter.limit(register_limit)
+async def register(
+    request: Request,
+    user_data: UserCreate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
     """Register a new user."""
     # Check if username exists
     result = await db.execute(select(User).where(User.username == user_data.username))
@@ -166,7 +172,9 @@ async def update_user_role(
 
 
 @router.post("/token", response_model=Token)
+@limiter.limit(auth_limit)
 async def login(
+    request: Request,
     form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
     db: Annotated[AsyncSession, Depends(get_db)]
 ):

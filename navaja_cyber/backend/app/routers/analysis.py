@@ -8,13 +8,14 @@ from pathlib import Path
 from typing import Annotated
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, BackgroundTasks
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.config import settings
 from backend.app.models.finding import Finding, FindingSeverity, FindingStatus
 from backend.app.models.user import User
+from backend.app.ratelimit import limiter, scan_limit
 from backend.app.routers.auth import get_current_user
 from backend.app.security import (
     ValidationError,
@@ -53,7 +54,9 @@ class ScanResult(BaseModel):
 
 
 @router.post("/scan", response_model=ScanResponse)
+@limiter.limit(scan_limit)
 async def start_scan(
+    request: Request,
     scan_request: ScanRequest,
     background_tasks: BackgroundTasks,
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -252,7 +255,9 @@ async def get_scan_status(
 
 
 @router.post("/upload", response_model=ScanResponse)
+@limiter.limit(scan_limit)
 async def upload_and_scan(
+    request: Request,
     background_tasks: BackgroundTasks,
     db: Annotated[AsyncSession, Depends(get_db)],
     user: Annotated[User, Depends(get_current_user)],

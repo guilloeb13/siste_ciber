@@ -8,10 +8,12 @@ from typing import Annotated
 from uuid import UUID, uuid4
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from backend.app.ratelimit import limiter, submit_limit
 
 from backend.app.config import settings
 from backend.app.models.ctf import (
@@ -300,7 +302,9 @@ async def list_teams(
 
 
 @router.post("/submit", response_model=dict)
+@limiter.limit(submit_limit)
 async def submit_flag(
+    request: Request,
     submission: FlagSubmit,
     db: Annotated[AsyncSession, Depends(get_db)],
 ):

@@ -143,3 +143,32 @@ async def test_password_minimum_length_enforced(client):
         json={"username": "shorty", "email": "s@example.com", "password": "short"},
     )
     assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_login_is_rate_limited(client):
+    """Repeated login attempts from one client must eventually get a 429."""
+    from backend.app.config import settings
+    from backend.app.ratelimit import limiter
+
+    # Enable limiting and force a tiny limit for a deterministic test.
+    original_enabled = limiter.enabled
+    original_limit = settings.rate_limit_auth
+    limiter.enabled = True
+    settings.rate_limit_auth = 3
+    limiter.reset()
+    try:
+        statuses = []
+        for _ in range(6):
+            r = await client.post(
+                "/api/auth/token",
+                data={"username": "nobody", "password": "wrong-password"},
+            )
+            statuses.append(r.status_code)
+        # First few are normal auth failures (401); once the limit is hit we
+        # must see at least one 429 Too Many Requests.
+        assert 429 in statuses, statuses
+    finally:
+        limiter.enabled = original_enabled
+        settings.rate_limit_auth = original_limit
+        limiter.reset()
